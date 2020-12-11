@@ -169,7 +169,9 @@ local constants = {
     ttl = 60,
   },
 
-  CACHE_PAGE_KEY = "kong:cache:page",
+  DECLARATIVE_PAGE_KEY = "declarative:page",
+  DECLARATIVE_LOAD_KEY = "declarative_config:loaded",
+  DECLARATIVE_HASH_KEY = "declarative_config:hash",
 
   CLUSTER_ID_PARAM_KEY = "cluster_id",
 }

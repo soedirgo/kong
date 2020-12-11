@@ -18,7 +18,7 @@ local REMOVE_FIRST_LINE_PATTERN = "^[^\n]+\n(.+)$"
 local PREFIX = ngx.config.prefix()
 local SUBSYS = ngx.config.subsystem
 local WORKER_COUNT = ngx.worker.count()
-
+local DECLARATIVE_HASH_KEY = constants.DECLARATIVE_HASH_KEY
 
 local declarative = {}
 
@@ -480,7 +480,7 @@ end
 
 
 function declarative.get_current_hash()
-  return ngx.shared.kong:get("declarative_config:hash")
+  return ngx.shared.kong:get(DECLARATIVE_HASH_KEY)
 end
 
 
@@ -745,9 +745,9 @@ function declarative.load_into_cache(entities, meta, hash, shadow)
     return nil, err
   end
 
-  local ok, err = ngx.shared.kong:safe_set("declarative_config:hash", hash or true)
+  local ok, err = ngx.shared.kong:safe_set(DECLARATIVE_HASH_KEY, hash or true)
   if not ok then
-    return nil, "failed to set declarative_config:hash in shm: " .. err
+    return nil, "failed to set " .. DECLARATIVE_HASH_KEY .. " in shm: " .. err
   end
 
 
@@ -759,7 +759,7 @@ end
 do
   local DECLARATIVE_FLIPS_NAME = constants.DECLARATIVE_FLIPS.name
   local DECLARATIVE_FLIPS_TTL = constants.DECLARATIVE_FLIPS.ttl
-  local CACHE_PAGE_KEY = constants.CACHE_PAGE_KEY
+  local DECLARATIVE_PAGE_KEY = constants.DECLARATIVE_PAGE_KEY
 
   function declarative.load_into_cache_with_events(entities, meta, hash)
     if ngx.worker.exiting() then
@@ -829,7 +829,7 @@ do
       return nil, err
     end
 
-    ok, err = ngx.shared.kong:set(CACHE_PAGE_KEY, kong.cache:get_page())
+    ok, err = ngx.shared.kong:set(DECLARATIVE_PAGE_KEY, kong.cache:get_page())
     if not ok then
       ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
       return nil, "failed to persist cache page number: " .. err
@@ -845,7 +845,7 @@ do
 
     while sleep_left > 0 do
       local flips = ngx.shared.kong:get(DECLARATIVE_FLIPS_NAME)
-      if  flips == nil or flips == WORKER_COUNT then
+      if flips == nil or flips >= WORKER_COUNT then
         break
       end
 

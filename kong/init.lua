@@ -119,6 +119,13 @@ if not enable_keepalive then
 end
 
 
+local WORKER_COUNT = ngx.worker.count()
+local DECLARATIVE_LOAD_KEY = constants.DECLARATIVE_LOAD_KEY
+local DECLARATIVE_HASH_KEY = constants.DECLARATIVE_HASH_KEY
+local DECLARATIVE_FLIPS_KEY = constants.DECLARATIVE_FLIPS.name
+local DECLARATIVE_FLIPS_TTL = constants.DECLARATIVE_FLIPS.ttl
+
+
 local declarative_entities
 local declarative_meta
 local schema_state
@@ -167,12 +174,9 @@ end
 
 local reset_kong_shm
 do
-  local CACHE_PAGE_KEY = constants.CACHE_PAGE_KEY
-
+  local DECLARATIVE_PAGE_KEY = constants.DECLARATIVE_PAGE_KEY
   local preserve_keys = {
     "kong:node_id",
-    CACHE_PAGE_KEY,
-    "cluster_events:at",
     "events:requests",
     "events:requests:http",
     "events:requests:https",
@@ -182,53 +186,55 @@ do
     "events:requests:grpcs",
     "events:requests:ws",
     "events:requests:wss",
+    "events:requests:go_plugins",
     "events:streams",
     "events:streams:tcp",
     "events:streams:tls",
-    "events:requests:go_plugins",
   }
 
-  reset_kong_shm = function()
-    local old_cache_page = ngx.shared.kong:get(CACHE_PAGE_KEY)
-    if old_cache_page == nil then
-      -- fresh node, just storing the initial page
-      ngx.shared.kong:set(CACHE_PAGE_KEY, 1)
+  reset_kong_shm = function(config)
+    local dbless = config.database == "off"
+    local declarative_config = dbless and config.declarative_config
+
+    if dbless then -- prevent POST /config from happening while initializing
+      ngx.shared.kong:add(DECLARATIVE_FLIPS_KEY, 0, DECLARATIVE_FLIPS_TTL)
+    end
+
+    local old_page = ngx.shared.kong:get(DECLARATIVE_PAGE_KEY)
+    if old_page == nil then -- fresh node, just storing the initial page
+      ngx.shared.kong:set(DECLARATIVE_PAGE_KEY, 1)
       return
     end
 
     local preserved = {}
 
+    local new_page
+    if declarative_config then
+      new_page = old_page == 1 and 2 or 1
+
+    else
+      new_page = old_page
+
+      if dbless then
+        preserved[DECLARATIVE_LOAD_KEY] = ngx.shared.kong:get(DECLARATIVE_LOAD_KEY)
+        preserved[DECLARATIVE_HASH_KEY] = ngx.shared.kong:get(DECLARATIVE_HASH_KEY)
+      end
+    end
+
+    preserved[DECLARATIVE_PAGE_KEY] = new_page
+
     for _, key in ipairs(preserve_keys) do
       preserved[key] = ngx.shared.kong:get(key) -- ignore errors
     end
 
-    local current_page = preserved[CACHE_PAGE_KEY] or 1
-    local suffix = current_page == 1 and "" or "_2"
-
-    local shms = {
-      "kong",
-      "kong_locks",
-      "kong_healthchecks",
-      "kong_cluster_events",
-      "kong_rate_limiting_counters",
-      "kong_core_db_cache" .. suffix,
-      "kong_core_db_cache_miss" .. suffix,
-      "kong_db_cache" .. suffix,
-      "kong_db_cache_miss" .. suffix,
-      "kong_clustering",
-    }
-
-    for _, shm in ipairs(shms) do
-      local dict = ngx.shared[shm]
-      if dict then
-        dict:flush_all()
-        dict:flush_expired(0)
-      end
+    ngx.shared.kong:flush_all()
+    if dbless then
+      ngx.shared.kong:add(DECLARATIVE_FLIPS_KEY, 0, DECLARATIVE_FLIPS_TTL)
     end
-
-    for _, key in ipairs(preserve_keys) do
-      ngx.shared.kong:set(key, preserved[key])
+    for key, value in pairs(preserved) do
+      ngx.shared.kong:set(key, value)
     end
+    ngx.shared.kong:flush_expired(0)
   end
 end
 
@@ -349,7 +355,7 @@ local function load_declarative_config(kong_config, entities, meta)
   }
 
   local ok, err = concurrency.with_worker_mutex(opts, function()
-    local value = ngx.shared.kong:get("declarative_config:loaded")
+    local value = ngx.shared.kong:get(DECLARATIVE_LOAD_KEY)
     if value then
       return true
     end
@@ -364,7 +370,7 @@ local function load_declarative_config(kong_config, entities, meta)
                       kong_config.declarative_config)
     end
 
-    ok, err = ngx.shared.kong:safe_set("declarative_config:loaded", true)
+    ok, err = ngx.shared.kong:safe_set(DECLARATIVE_LOAD_KEY, true)
     if not ok then
       kong.log.warn("failed marking declarative_config as loaded: ", err)
     end
@@ -373,6 +379,13 @@ local function load_declarative_config(kong_config, entities, meta)
   end)
 
   if ok then
+    if ngx.shared.kong:get(DECLARATIVE_FLIPS_KEY) then
+      local flips = ngx.shared.kong:incr(DECLARATIVE_FLIPS_KEY, 1)
+      if flips and flips >= WORKER_COUNT then
+        ngx.shared.kong:delete(DECLARATIVE_FLIPS_KEY)
+      end
+    end
+
     local default_ws = kong.db.workspaces:select_by_name("default")
     kong.default_workspace = default_ws and default_ws.id or kong.default_workspace
 
@@ -412,13 +425,6 @@ local Kong = {}
 
 
 function Kong.init()
-  reset_kong_shm()
-
-  -- special math.randomseed from kong.globalpatches not taking any argument.
-  -- Must only be called in the init or init_worker phases, to avoid
-  -- duplicated seeds.
-  math.randomseed()
-
   local pl_path = require "pl.path"
   local conf_loader = require "kong.conf_loader"
 
@@ -431,6 +437,13 @@ function Kong.init()
   -- retrieve kong_config
   local conf_path = pl_path.join(ngx.config.prefix(), ".kong_env")
   local config = assert(conf_loader(conf_path, nil, { from_kong_env = true }))
+
+  reset_kong_shm(config)
+
+  -- special math.randomseed from kong.globalpatches not taking any argument.
+  -- Must only be called in the init or init_worker phases, to avoid
+  -- duplicated seeds.
+  math.randomseed()
 
   kong_global.init_pdk(kong, config, nil) -- nil: latest PDK
 

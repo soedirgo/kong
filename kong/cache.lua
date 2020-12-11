@@ -151,9 +151,9 @@ function _M.new(opts)
   local shm_names = {}
 
   for i = 1, opts.cache_pages or 1 do
-    local channel_name  = (i == 1) and "mlcache"                 or "mlcache_2"
-    local shm_name      = (i == 1) and opts.shm_name             or opts.shm_name .. "_2"
-    local shm_miss_name = (i == 1) and opts.shm_name .. "_miss"  or opts.shm_name .. "_miss_2"
+    local channel_name  = i == 1 and "mlcache"                 or "mlcache_2"
+    local shm_name      = i == 1 and opts.shm_name             or opts.shm_name .. "_2"
+    local shm_miss_name = i == 1 and opts.shm_name .. "_miss"  or opts.shm_name .. "_miss_2"
 
     if not ngx.shared[shm_name] then
       log(ERR, "shared dictionary ", shm_name, " not found")
@@ -198,11 +198,7 @@ function _M.new(opts)
     end
   end
 
-  local page = 1
-  if opts.cache_pages == 2 and opts.page then
-    page = opts.page
-  end
-
+  local page = opts.cache_pages == 2 and opts.page or 1
   local self       = {
     cluster_events = opts.cluster_events,
     mlcache        = mlcaches[page],
@@ -349,7 +345,7 @@ function _M:flip()
   end
 
   log(DEBUG, "flipping current cache")
-  self.page = self.get_page() == 2 and 1 or 2
+  self.page = self:get_page() == 2 and 1 or 2
   self.mlcache = self.mlcaches[self.page]
 end
 
